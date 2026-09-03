@@ -165,7 +165,19 @@ so "no requests" is certain; if the file is larger, keep it and title it `'Untit
 because absence of evidence is not evidence there. All 43 empty files here are under 256 KB, and
 no file over 256 KB lacks a request, so the rule drops exactly the empty ones.
 
-Expected result: **106 threads** from 149 files.
+### One session can exist in both formats
+
+Two uuids here have **both** a `.json` and a `.jsonl` — sessions VS Code migrated to the newer
+format without removing the old file. Since the id is the filename stem, emitting both would
+hand the colony two threads with the same `vscode-copilot:<uuid>`, which is the id collision the
+adapter contract forbids, arrived at from inside a single adapter rather than between two.
+
+Sessions are therefore deduplicated by uuid after the empty-session skip, preferring the
+`.jsonl` — it is the format the session was migrated *to*. Doing it after the skip matters: if
+the surviving copy of a pair is the older one because the newer is empty, the thread is still
+kept.
+
+Expected result: **104 threads** from 149 files.
 
 ## The `Thread` mapping
 
@@ -287,9 +299,9 @@ Against the checklist in `server/harnesses/README.md`:
 
 1. `node --check server/harnesses/vscode-copilot.mjs`
 2. `curl -s localhost:5274/api/harnesses` shows `vscode-copilot` with `detected: true`.
-3. A scan straight from node returns **106** threads from 149 files, no field `undefined`, and
-   **104** of them carrying a real title rather than `'Untitled thread'` (64 `.json` prompts plus
-   40 `.jsonl`).
+3. A scan straight from node returns **104** threads from 149 files — 43 skipped as empty, two
+   uuids deduplicated — with no field `undefined`, **102** carrying a real title rather than
+   `'Untitled thread'`, 76 a model and 91 a chat mode. Every `id` in the result is unique.
 4. `npm run dev` — astronauts land on the right plots, thread cards fill in, Open focuses the
    right VS Code window, Archive is greyed out.
 5. `copilot-cli` still returns 78 threads, of which the four ids listed in
