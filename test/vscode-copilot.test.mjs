@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import vscode, { pathFromFileUri, readWorkspace, readJsonl } from '../server/harnesses/vscode-copilot.mjs'
+import vscode, { pathFromFileUri, readWorkspace, readJsonl, readJson } from '../server/harnesses/vscode-copilot.mjs'
 
 /**
  * Build a throwaway VS Code roaming directory. `workspaces` maps a storage-hash name to
@@ -178,4 +178,98 @@ test('reports an empty session as having no requests', async () => {
   assert.equal(m.requests, 0)
   assert.equal(m.complete, true)
   assert.equal(m.sawBase, true)
+})
+
+/** A pretty-printed `.json` session, which is how VS Code actually writes them. */
+const jsonSession = (text = 'Fix the login redirect', extra = {}) =>
+  JSON.stringify({
+    version: 3,
+    initialLocation: 'panel',
+    requests: [{
+      requestId: 'r1',
+      message: { parts: [], text },
+      modelId: 'github.copilot-chat/claude-sonnet-4',
+      agent: { id: 'github.copilot.editsAgent' },
+    }],
+    sessionId: 'ignored',
+    creationDate: Date.parse('2026-09-01T10:00:00.000Z'),
+    lastMessageDate: Date.parse('2026-09-01T12:30:00.000Z'),
+    ...extra,
+  }, null, 2)
+
+const readJsonFile = async (name, body) => {
+  const { file, size } = await sessionFile(name, body)
+  return readJson(file, size)
+}
+
+test('reads a pretty-printed .json session', async () => {
+  const m = await readJsonFile('a.json', jsonSession())
+  assert.equal(m.prompt, 'Fix the login redirect')
+  assert.equal(m.modelId, 'github.copilot-chat/claude-sonnet-4')
+  assert.equal(m.agentId, 'github.copilot.editsAgent')
+  assert.equal(m.location, 'panel')
+  assert.equal(m.requests, 1)
+  assert.equal(m.createdAt, Date.parse('2026-09-01T10:00:00.000Z'))
+  assert.equal(m.lastMessageDate, Date.parse('2026-09-01T12:30:00.000Z'))
+})
+
+/**
+ * `message` is `{ parts, text }` and a `parts` entry carries its own `text`, so a regex on
+ * the first `"text"` picks up a fragment. The reader must brace-match the message object.
+ */
+test('takes the message text, not a text fragment from message.parts', async () => {
+  const body = JSON.stringify({
+    version: 3,
+    initialLocation: 'panel',
+    requests: [{ requestId: 'r1', message: { parts: [{ kind: 'text', text: 'FRAGMENT' }], text: 'the real prompt' } }],
+    creationDate: 1,
+    lastMessageDate: 2,
+  }, null, 2)
+  const m = await readJsonFile('b.json', body)
+  assert.equal(m.prompt, 'the real prompt')
+})
+
+/** A `}` inside a string value must not close the object early. */
+test('brace-matching survives braces inside the prompt', async () => {
+  const body = JSON.stringify({
+    version: 3,
+    initialLocation: 'panel',
+    requests: [{ message: { parts: [], text: 'why does {"a": 1} fail?' } }],
+    creationDate: 1,
+    lastMessageDate: 2,
+  }, null, 2)
+  const m = await readJsonFile('c.json', body)
+  assert.equal(m.prompt, 'why does {"a": 1} fail?')
+})
+
+test('takes customTitle and hasPendingEdits from the tail', async () => {
+  const m = await readJsonFile('d.json',
+    jsonSession('Fix the login redirect', { customTitle: 'Login redirect bug', hasPendingEdits: true }))
+  assert.equal(m.customTitle, 'Login redirect bug')
+  assert.equal(m.pendingEdits, true)
+})
+
+test('unescapes a customTitle that contains a quote', async () => {
+  const m = await readJsonFile('e.json', jsonSession('x', { customTitle: 'the "real" bug' }))
+  assert.equal(m.customTitle, 'the "real" bug')
+})
+
+test('reports an empty requests array as no requests', async () => {
+  const body = JSON.stringify(
+    { version: 3, initialLocation: 'panel', requests: [], creationDate: 1, lastMessageDate: 2 }, null, 2)
+  const m = await readJsonFile('f.json', body)
+  assert.equal(m.requests, 0)
+  assert.equal(m.complete, true)
+})
+
+test('flags an error recorded in a request result', async () => {
+  const body = JSON.stringify({
+    version: 3,
+    initialLocation: 'panel',
+    requests: [{ message: { parts: [], text: 'do it' }, result: { errorDetails: { message: 'nope' } } }],
+    creationDate: 1,
+    lastMessageDate: 2,
+  }, null, 2)
+  const m = await readJsonFile('g.json', body)
+  assert.equal(m.hasError, true)
 })

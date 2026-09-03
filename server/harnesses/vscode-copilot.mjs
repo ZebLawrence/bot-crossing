@@ -25,7 +25,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { readFile } from 'node:fs/promises'
 
-import { exists, num, readHead } from '../lib/fsutil.mjs'
+import { exists, num, readHead, readTail } from '../lib/fsutil.mjs'
 
 /** Stable and Insiders share a layout and a product; they differ only by directory name. */
 const VARIANTS = ['Code', 'Code - Insiders']
@@ -170,6 +170,99 @@ export async function readJsonl(file, size) {
     const nl = text.indexOf('\n')
     applyRecords(m, parseLines(nl < 0 ? text : text.slice(0, nl)))
   }
+  m.complete = size <= HEAD_BYTES
+  return m
+}
+
+/** `.json` keeps its scalars in the last few hundred bytes; 8 KB is generous. */
+const TAIL_BYTES = 8 * 1024
+
+/**
+ * The index of the `}` closing the object that opens at `open`, or -1 if it never closes
+ * inside `s`. String state is tracked because a `}` inside a prompt is ordinary text.
+ */
+function matchObject(s, open) {
+  let depth = 0
+  let inStr = false
+  let esc = false
+  for (let i = open; i < s.length; i++) {
+    const ch = s[i]
+    if (inStr) {
+      if (esc) esc = false
+      else if (ch === '\\') esc = true
+      else if (ch === '"') inStr = false
+      continue
+    }
+    if (ch === '"') inStr = true
+    else if (ch === '{') depth++
+    else if (ch === '}' && --depth === 0) return i
+  }
+  return -1
+}
+
+/** Unescape one JSON string body captured by a regex. Empty when it will not parse. */
+function jsonString(body) {
+  try {
+    return String(JSON.parse(`"${body}"`))
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * These files are **pretty-printed** — `"version": 3`, with whitespace around every colon.
+ * Every pattern here needs `\s*`; a plain `"text":"` matches none of the 73 real files.
+ *
+ * A parser is not an option: `requests` runs to 24 MB, and `JSON.parse` cannot be given a
+ * truncated object. So the prompt is brace-matched out of the head, and everything else is
+ * matched out of one end or the other.
+ */
+export async function readJson(file, size) {
+  const m = emptyMeta()
+  const head = await readHead(file, HEAD_BYTES)
+  m.sawBase = true
+
+  const location = /"initialLocation"\s*:\s*"([^"]*)"/.exec(head)
+  if (location) m.location = location[1]
+
+  // Whether there are any requests at all, which is what the empty-session skip turns on.
+  const requests = /"requests"\s*:\s*\[\s*(.)/.exec(head)
+  if (requests) m.requests = requests[1] === ']' ? 0 : 1
+
+  const message = /"message"\s*:\s*\{/.exec(head)
+  if (message) {
+    const open = message.index + message[0].length - 1
+    const end = matchObject(head, open)
+    if (end > 0) {
+      try {
+        const text = JSON.parse(head.slice(open, end + 1))?.text
+        if (typeof text === 'string' && text.trim()) m.prompt = text.trim()
+      } catch {
+        /* not the shape we expect — the thread falls back to Untitled */
+      }
+    }
+  }
+
+  // Best-effort: both sit after `response` inside a request, so a bounded head reaches them
+  // for some sessions and not others — 38 of the 48 real files that carry a model, 53 of 73
+  // for the mode. A blank field on a card beats a 24 MB parse on a poll.
+  const model = /"modelId"\s*:\s*"([^"]*)"/.exec(head)
+  if (model) m.modelId = model[1]
+  const agent = /"id"\s*:\s*"(github\.copilot\.[A-Za-z]+)"/.exec(head)
+  if (agent) m.agentId = agent[1]
+  if (head.includes('"errorDetails"')) m.hasError = true
+
+  // When the head already covered the file, it *is* the tail — do not read twice.
+  const tail = size > HEAD_BYTES ? await readTail(file, TAIL_BYTES) : head
+  const created = /"creationDate"\s*:\s*(\d+)/.exec(tail)
+  if (created) m.createdAt = num(created[1])
+  const last = /"lastMessageDate"\s*:\s*(\d+)/.exec(tail)
+  if (last) m.lastMessageDate = num(last[1])
+  const custom = /"customTitle"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(tail)
+  if (custom) m.customTitle = jsonString(custom[1])
+  if (/"hasPendingEdits"\s*:\s*true/.test(tail)) m.pendingEdits = true
+  if (tail.includes('"errorDetails"')) m.hasError = true
+
   m.complete = size <= HEAD_BYTES
   return m
 }
