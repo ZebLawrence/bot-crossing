@@ -20,8 +20,14 @@ import { exists, jsonLines, listDirs, listFiles, num, readHead } from '../lib/fs
 const execFileAsync = promisify(execFile)
 const HOME = os.homedir()
 
-/** Where the Claude desktop app keeps one JSON record per thread. */
-const DESKTOP_SESSIONS = path.join(HOME, 'Library', 'Application Support', 'Claude', 'claude-code-sessions')
+/**
+ * Where the Claude desktop app keeps one JSON record per thread. The account/org/`local_*.json`
+ * layout underneath is identical on both platforms; only the application-data root differs.
+ */
+const APP_SUPPORT = process.platform === 'win32'
+  ? process.env.APPDATA || path.join(HOME, 'AppData', 'Roaming')
+  : path.join(HOME, 'Library', 'Application Support')
+const DESKTOP_SESSIONS = path.join(APP_SUPPORT, 'Claude', 'claude-code-sessions')
 /** Where the CLI keeps the raw transcript: ~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl */
 const CLI_PROJECTS = path.join(HOME, '.claude', 'projects')
 /** One file per live CLI process: {pid, sessionId, cwd, ...}. Stale files outlive their pid. */
@@ -83,12 +89,14 @@ function readTranscriptMeta(records) {
   return meta
 }
 
-/** `/repo/.claude/worktrees/feature-abc` -> project `/repo`, worktree `feature-abc`. */
+/**
+ * `/repo/.claude/worktrees/feature-abc` -> project `/repo`, worktree `feature-abc`.
+ * Either separator, so `C:\repo\.claude\worktrees\feature-abc` splits the same way.
+ */
 function splitWorktree(cwd) {
-  const marker = '/.claude/worktrees/'
-  const i = cwd.indexOf(marker)
-  if (i === -1) return { root: cwd, worktree: '' }
-  return { root: cwd.slice(0, i), worktree: cwd.slice(i + marker.length).split('/')[0] }
+  const m = /[\\/]\.claude[\\/]worktrees[\\/]/.exec(cwd)
+  if (!m) return { root: cwd, worktree: '' }
+  return { root: cwd.slice(0, m.index), worktree: cwd.slice(m.index + m[0].length).split(/[\\/]/)[0] }
 }
 
 function projectOf(cwd, originCwd) {
@@ -97,8 +105,15 @@ function projectOf(cwd, originCwd) {
   return { projectPath, project: path.basename(projectPath) || projectPath || 'unknown', worktree }
 }
 
-/** Best-effort reverse of the `-Users-you-Some-Dir` encoding used for project folder names. */
+/**
+ * Best-effort reverse of the encoding used for project folder names — `-Users-you-Some-Dir`
+ * on POSIX, `C--Projects-Some-Dir` on Windows. Lossy on both, because a hyphen inside a real
+ * folder name is indistinguishable from a separator, so this is only ever the fallback for a
+ * transcript that recorded no `cwd` of its own.
+ */
 function decodeProjectDir(name) {
+  const drive = /^([A-Za-z])--(.*)$/.exec(name)
+  if (drive) return `${drive[1]}:\\${drive[2].replace(/-/g, '\\')}`
   return name.startsWith('-') ? '/' + name.slice(1).replace(/-/g, '/') : name
 }
 
@@ -406,6 +421,47 @@ function newSession(dir) {
 }
 
 /**
+ * One line per `claude.exe`: ISO-8601 creation time, a `|`, then the full command line.
+ * `Get-CimInstance` rather than `Get-Process` because only the CIM record carries the command
+ * line — and that is the only thing telling the desktop app apart from its own Electron
+ * helpers and from the `claude.exe` of the CLI.
+ */
+const WIN_PROCESS_QUERY =
+  `Get-CimInstance Win32_Process -Filter "Name='claude.exe'" | ` +
+  `ForEach-Object { $_.CreationDate.ToUniversalTime().ToString('o') + '|' + $_.CommandLine }`
+
+/** The app's *main* process, on either platform. Helper processes carry a `--type=` flag. */
+async function mainProcessStartedAt() {
+  if (process.platform === 'win32') {
+    const { stdout } = await execFileAsync(
+      'powershell',
+      ['-NoProfile', '-NonInteractive', '-Command', WIN_PROCESS_QUERY],
+      { maxBuffer: 8 * 1024 * 1024, windowsHide: true }
+    )
+    for (const line of stdout.split('\n')) {
+      const i = line.indexOf('|') // first only: the command line has its own
+      if (i === -1) continue
+      const command = line.slice(i + 1)
+      if (!/[\\/]app[\\/]claude\.exe/i.test(command) || command.includes('--type=')) continue
+      const parsed = Date.parse(line.slice(0, i).trim())
+      return Number.isNaN(parsed) ? 0 : parsed
+    }
+    return 0
+  }
+
+  const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,lstart=,command='], { maxBuffer: 8 * 1024 * 1024 })
+  for (const line of stdout.split('\n')) {
+    const m = line.match(/^\s*\d+\s+(\w{3} \w{3}\s+\d+ \d{2}:\d{2}:\d{2} \d{4})\s+(\/.*)$/)
+    if (!m) continue
+    const [, when, command] = m
+    if (!command.includes('/Claude.app/Contents/MacOS/Claude') || command.includes('--type=')) continue
+    const parsed = Date.parse(when)
+    return Number.isNaN(parsed) ? 0 : parsed
+  }
+  return 0
+}
+
+/**
  * When the Claude desktop app last launched. It loads every session record into memory at
  * startup and never re-reads them, so this timestamp is the line between an archive it has
  * seen and one still waiting on disk.
@@ -417,19 +473,9 @@ async function appStartedAt() {
 
   let started = 0
   try {
-    const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,lstart=,command='], { maxBuffer: 8 * 1024 * 1024 })
-    for (const line of stdout.split('\n')) {
-      const m = line.match(/^\s*\d+\s+(\w{3} \w{3}\s+\d+ \d{2}:\d{2}:\d{2} \d{4})\s+(\/.*)$/)
-      if (!m) continue
-      const [, when, command] = m
-      // The main process only — helper processes carry a --type= flag.
-      if (!command.includes('/Claude.app/Contents/MacOS/Claude') || command.includes('--type=')) continue
-      const parsed = Date.parse(when)
-      if (!Number.isNaN(parsed)) started = parsed
-      break
-    }
+    started = await mainProcessStartedAt()
   } catch {
-    /* ps unavailable — treat the app as never having restarted */
+    /* ps or powershell unavailable — treat the app as never having restarted */
   }
   appStartCache = { at: started, checkedAt: now }
   return started
