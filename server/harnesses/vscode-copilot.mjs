@@ -25,7 +25,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { readFile } from 'node:fs/promises'
 
-import { exists } from '../lib/fsutil.mjs'
+import { exists, num, readHead } from '../lib/fsutil.mjs'
 
 /** Stable and Insiders share a layout and a product; they differ only by directory name. */
 const VARIANTS = ['Code', 'Code - Insiders']
@@ -78,6 +78,100 @@ export async function readWorkspace(dir) {
     if (p) return { projectPath: path.dirname(p), project: path.basename(p, path.extname(p)) }
   }
   return { projectPath: '', project: '' }
+}
+
+/** How much of a session file a scan is willing to read. 256 KB is the knee of the curve
+ *  for both formats: on 149 real files it recovers 37 of 42 `.jsonl` prompts against 34 at
+ *  64 KB and 39 at 1 MB, for a 4.7 MB cold read against 14.9 MB. */
+const HEAD_BYTES = 256 * 1024
+
+/** A line 0 longer than the head is rare — 4 of 76 files — but reaches 1 MB when it happens. */
+const LINE0_CAP = 4 * 1024 * 1024
+
+/** Everything either reader can learn, so the mapping to a Thread is written once. */
+export const emptyMeta = () => ({
+  sawBase: false, // did we recover the document itself, or only patches?
+  complete: false, // did the read cover the whole file? decides the empty-session skip
+  requests: 0,
+  prompt: '',
+  customTitle: '',
+  modelId: '',
+  agentId: '',
+  location: '',
+  createdAt: 0,
+  lastMessageDate: 0,
+  pendingEdits: false,
+  hasError: false,
+})
+
+function takeRequest(m, q) {
+  if (!q || typeof q !== 'object') return
+  m.requests++
+  const text = q.message?.text
+  if (!m.prompt && typeof text === 'string' && text.trim()) m.prompt = text.trim()
+  if (q.modelId) m.modelId = String(q.modelId)
+  if (q.agent?.id) m.agentId = String(q.agent.id)
+  if (q.result?.errorDetails) m.hasError = true
+}
+
+/**
+ * Fold the patch log into `m`. Only the paths that feed a Thread are honoured — this is
+ * deliberately not a general JSON-patch replayer, because nothing on a thread card needs
+ * one.
+ */
+function applyRecords(m, records) {
+  for (const r of records) {
+    if (r?.kind === 0) {
+      const v = r.v || {}
+      m.sawBase = true
+      if (v.creationDate) m.createdAt = num(v.creationDate)
+      if (v.initialLocation) m.location = String(v.initialLocation)
+      if (v.customTitle) m.customTitle = String(v.customTitle)
+      m.pendingEdits = !!v.hasPendingEdits
+      for (const q of v.requests || []) takeRequest(m, q)
+      continue
+    }
+    const k = r?.k
+    if (!Array.isArray(k)) continue
+    if (r.kind === 2 && k.length === 1 && k[0] === 'requests') {
+      for (const q of r.v || []) takeRequest(m, q)
+    } else if (r.kind === 1 && k.length === 1) {
+      if (k[0] === 'customTitle' && r.v) m.customTitle = String(r.v)
+      else if (k[0] === 'hasPendingEdits') m.pendingEdits = !!r.v
+    } else if (r.kind === 1 && k.length === 3 && k[0] === 'requests' && k[2] === 'result') {
+      if (r.v?.errorDetails) m.hasError = true
+    }
+  }
+}
+
+/** Parse a JSONL blob, skipping the partial or malformed lines a live file always has. */
+function parseLines(text) {
+  const out = []
+  for (const line of text.split('\n')) {
+    const t = line.trim()
+    if (!t.startsWith('{')) continue
+    try {
+      out.push(JSON.parse(t))
+    } catch {
+      /* partial or malformed record — skip it, keep the rest */
+    }
+  }
+  return out
+}
+
+export async function readJsonl(file, size) {
+  const m = emptyMeta()
+  applyRecords(m, parseLines(await readHead(file, HEAD_BYTES)))
+  if (!m.sawBase) {
+    // `readHead` drops a trailing partial line, so a line 0 longer than the head leaves
+    // nothing parseable. Such a line 0 is long *because* it already holds the requests,
+    // so reading it alone recovers the prompt as well as the metadata.
+    const text = await readHead(file, LINE0_CAP)
+    const nl = text.indexOf('\n')
+    applyRecords(m, parseLines(nl < 0 ? text : text.slice(0, nl)))
+  }
+  m.complete = size <= HEAD_BYTES
+  return m
 }
 
 export default {
