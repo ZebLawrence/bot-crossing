@@ -8,8 +8,9 @@
  */
 import claudeCode from './claude-code.mjs'
 import copilotCli from './copilot-cli.mjs'
+import vscodeCopilot from './vscode-copilot.mjs'
 
-export const HARNESSES = [claudeCode, copilotCli]
+export const HARNESSES = [claudeCode, copilotCli, vscodeCopilot]
 
 export const harnessById = (id) => HARNESSES.find((h) => h.id === id) || null
 

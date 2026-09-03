@@ -430,3 +430,10 @@ test('setArchived declines and says why', async () => {
   assert.equal(r.ok, false)
   assert.match(r.error, /archived/i)
 })
+
+test('the harness is registered, with an id nothing else uses', async () => {
+  const { HARNESSES, harnessById } = await import('../server/harnesses/index.mjs')
+  assert.equal(harnessById('vscode-copilot')?.name, 'VS Code Copilot')
+  const ids = HARNESSES.map((h) => h.id)
+  assert.equal(new Set(ids).size, ids.length, `duplicate harness id in ${ids.join(', ')}`)
+})
