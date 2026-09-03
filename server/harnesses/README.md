@@ -136,6 +136,15 @@ Verified on a real machine:
   `~/Library/Application Support/Claude/claude-code-sessions/<account>/<org>/local_*.json`;
   CLI transcripts in `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`; live processes in
   `~/.claude/sessions/*.json`. Implemented in `claude-code.mjs`.
+- **Copilot CLI** — `~/.copilot/session-state/<uuid>/`. Two layers, and reading only the
+  newer one silently drops most sessions: **every** session has `workspace.yaml` (flat
+  `key: value` — `cwd`, `git_root`, `repository`, `branch`, `created_at`, `updated_at`),
+  while only sessions written by the current CLI also have `events.jsonl`
+  (`{ id, parentId, timestamp, type, data }`, with `session.start.data.context` carrying the
+  same fields). On the machine this was written against: 22 of 22 had the yaml, 7 had the
+  event log. Reopening is `copilot --resume=<session-id>`; there is no URL scheme, so the
+  adapter writes a `.command` launcher to the temp dir and returns its `file://` URL.
+  Implemented in `copilot-cli.mjs`.
 - **Codex CLI** — transcripts in `~/.codex/sessions/YYYY/MM/DD/rollout-<iso>-<uuid>.jsonl`,
   with records shaped `{ timestamp, type, payload }`, and what looks like an index at
   `~/.codex/session_index.jsonl`. Not implemented yet.
