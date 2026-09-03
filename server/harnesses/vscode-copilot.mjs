@@ -332,6 +332,29 @@ function toThread(id, file, m, st, projectPath, project, now) {
   }
 }
 
+/**
+ * `vscode://file/C:/Projects/foo`. `encodeURI` rather than `encodeURIComponent`: the drive
+ * colon and the separators have to survive, and only characters like a space need escaping.
+ * Backslashes become forward slashes because a URL has no other kind.
+ */
+const fileUri = (p) => `vscode://file/${encodeURI(p.replace(/\\/g, '/'))}`
+
+/**
+ * There is no deep link to a chat session — the bundled extension's `onUri` handler takes
+ * only `/fixTestFailure` and a named-pipe path — so the best available is to open or focus
+ * the window the session belongs to, and let its history list do the rest.
+ */
+function openThread(ref) {
+  const dir = ref?.projectPath
+  if (!dir) return { ok: false, error: 'This thread has no workspace folder to open' }
+  return { ok: true, url: fileUri(dir) }
+}
+
+function newSession(dir) {
+  if (!dir) return { ok: false, error: 'No directory to open' }
+  return { ok: true, url: fileUri(dir) }
+}
+
 async function scanThreads({ roots, now = Date.now() } = {}) {
   // Keyed by session uuid: one session can exist as both a .json and a .jsonl after VS Code
   // migrates it, and two threads with one id would merge into one astronaut.
@@ -377,7 +400,12 @@ export default {
     return false
   },
   scanThreads,
-  openThread: () => ({ ok: false, error: 'not implemented yet' }),
-  newSession: () => ({ ok: false, error: 'not implemented yet' }),
-  setArchived: async () => ({ ok: false, error: 'not implemented yet' }),
+  openThread,
+  newSession,
+  setArchived: async () => ({
+    ok: false,
+    error: 'VS Code keeps no archived state for chat sessions',
+  }),
+  // `appStartedAt` is deliberately absent: it exists to tell a picked-up archive flag from
+  // one still waiting on disk, and this adapter never writes a flag.
 }

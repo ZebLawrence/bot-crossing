@@ -401,3 +401,32 @@ test('every field the colony reads is defined', async () => {
     assert.notEqual(t[key], undefined, `${key} is undefined`)
   }
 })
+
+test('openThread returns a vscode:// URL for the workspace folder', () => {
+  const r = vscode.openThread({ id: 'abc-123', projectPath: path.normalize('C:/Projects/flight-app') })
+  assert.equal(r.ok, true)
+  assert.equal(r.url, 'vscode://file/C:/Projects/flight-app')
+})
+
+test('openThread percent-encodes a space but leaves the drive colon alone', () => {
+  const r = vscode.openThread({ projectPath: path.normalize('C:/Program Files/App') })
+  assert.equal(r.url, 'vscode://file/C:/Program%20Files/App')
+})
+
+test('openThread declines when the thread has no folder', () => {
+  const r = vscode.openThread({ id: 'abc-123', projectPath: '' })
+  assert.equal(r.ok, false)
+  assert.match(r.error, /folder/i)
+})
+
+test('newSession opens the directory it is given', () => {
+  const r = vscode.newSession(path.normalize('C:/Projects/flight-app'))
+  assert.equal(r.ok, true)
+  assert.equal(r.url, 'vscode://file/C:/Projects/flight-app')
+})
+
+test('setArchived declines and says why', async () => {
+  const r = await vscode.setArchived({ id: 'abc-123' }, true)
+  assert.equal(r.ok, false)
+  assert.match(r.error, /archived/i)
+})
