@@ -39,6 +39,7 @@ somebody writing that adapter.
 | --- | --- |
 | **[Claude Code](https://claude.com/claude-code)** (Anthropic) | ✅ **Supported** — desktop app and CLI, including worktrees, live-process detection and archiving |
 | **[Copilot CLI](https://github.com/github/copilot-cli)** (GitHub) | ✅ **Supported** — both session formats (`workspace.yaml` and `events.jsonl`), resume via `copilot --resume` |
+| **[VS Code Copilot](https://code.visualstudio.com/docs/copilot/overview)** (GitHub) | ✅ **Supported** — both session formats (`.json` and `.jsonl`), stable and Insiders; opens the workspace |
 | [Codex CLI](https://developers.openai.com/codex/cli) (OpenAI) | ⬜ Not yet — transcripts found at `~/.codex/sessions/`, [notes here](server/harnesses/README.md#starting-points) |
 | [OpenCode](https://opencode.ai) | ⬜ Not yet |
 | [Antigravity CLI](https://antigravity.google) (Google) | ⬜ Not yet — the successor to Gemini CLI, which Google stopped serving individual accounts on 18 June 2026 |

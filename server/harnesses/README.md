@@ -145,6 +145,16 @@ Verified on a real machine:
   event log. Reopening is `copilot --resume=<session-id>`; there is no URL scheme, so the
   adapter writes a `.command` launcher to the temp dir and returns its `file://` URL.
   Implemented in `copilot-cli.mjs`.
+- **VS Code Copilot** — the chat panel’s own records, per workspace, in
+  `%APPDATA%\Code\User\workspaceStorage\<hash>\chatSessions\` (and
+  `~/Library/Application Support/Code/…` on macOS), with the sibling `workspace.json`
+  naming the folder. Two formats coexist there: `<uuid>.json`, one pretty-printed document,
+  and `<uuid>.jsonl`, that document on line 0 followed by patch records. Two traps, both
+  measured over 149 real files: line 0 of a `.jsonl` is written *before* the first prompt
+  exists and yields a request for only 11 of 76, and the `.json` files are pretty-printed,
+  so a pattern without `\s*` matches none of the 73. Note the sidebar overlap — the Copilot
+  sidebar in VS Code writes into `~/.copilot/session-state/`, so those threads belong to
+  `copilot-cli.mjs`, not here. Implemented in `vscode-copilot.mjs`.
 - **Codex CLI** — transcripts in `~/.codex/sessions/YYYY/MM/DD/rollout-<iso>-<uuid>.jsonl`,
   with records shaped `{ timestamp, type, payload }`, and what looks like an index at
   `~/.codex/session_index.jsonl`. Not implemented yet.
