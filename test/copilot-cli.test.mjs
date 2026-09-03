@@ -192,3 +192,36 @@ test('newSession launches the CLI with no session to resume', async () => {
   assert.doesNotMatch(body, /--resume/)
   assert.match(body, /copilot/)
 })
+
+/** `~/.copilot/sidebar-sessions-state/<hash>.json` — the VS Code sidebar's own bookkeeping. */
+async function withSidebar(root, cwd, sessionIds) {
+  const dir = path.join(root, 'sidebar-sessions-state')
+  await mkdir(dir, { recursive: true })
+  await writeFile(path.join(dir, 'a'.repeat(64) + '.json'),
+    JSON.stringify({ schemaVersion: 1, cwd, sessionIds }))
+  return root
+}
+
+test('marks a session the VS Code sidebar started, and leaves the others as cli', async () => {
+  const inSidebar = 'dddddddd-0000-0000-0000-000000000001'
+  const inTerminal = 'dddddddd-0000-0000-0000-000000000002'
+  const root = await fakeHome({
+    [inSidebar]: [start('/r', '/r', 'main', '2026-09-01T10:00:00.000Z'), userMsg('from vscode', '2026-09-01T10:00:05.000Z')],
+    [inTerminal]: [start('/r', '/r', 'main', '2026-09-01T10:00:00.000Z'), userMsg('from a terminal', '2026-09-01T10:00:05.000Z')],
+  })
+  await withSidebar(root, '/r', [inSidebar])
+
+  const threads = await copilot.scanThreads({ root })
+  const byId = Object.fromEntries(threads.map((t) => [t.id, t]))
+
+  assert.equal(byId[`copilot-cli:${inSidebar}`].source, 'vscode-sidebar')
+  assert.equal(byId[`copilot-cli:${inTerminal}`].source, 'cli')
+})
+
+test('sessions are still cli when there is no sidebar state at all', async () => {
+  const root = await fakeHome({
+    'dddddddd-0000-0000-0000-000000000003': [start('/r', '/r', 'main', '2026-09-01T10:00:00.000Z')],
+  })
+  const [t] = await copilot.scanThreads({ root })
+  assert.equal(t.source, 'cli')
+})
