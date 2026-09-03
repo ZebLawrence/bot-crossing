@@ -23,9 +23,9 @@
  */
 import os from 'node:os'
 import path from 'node:path'
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 
-import { exists, num, readHead, readTail } from '../lib/fsutil.mjs'
+import { exists, listDirs, listFiles, num, readHead, readTail } from '../lib/fsutil.mjs'
 
 /** Stable and Insiders share a layout and a product; they differ only by directory name. */
 const VARIANTS = ['Code', 'Code - Insiders']
@@ -267,6 +267,108 @@ export async function readJson(file, size) {
   return m
 }
 
+/** The CLI writes an event per turn, so anything inside a minute is mid-work. */
+const RUNNING_WINDOW_MS = 60_000
+
+const MODEL_PREFIX = 'github.copilot-chat/'
+
+/** VS Code's agent ids, as the chat mode a human would name. */
+const MODES = { editsAgent: 'agent', default: 'ask', editingSessionAgent: 'edit' }
+
+const chatMode = (agentId) => {
+  const suffix = agentId.split('.').pop() || ''
+  return MODES[suffix] || suffix
+}
+
+const isSession = (name) => name.endsWith('.json') || name.endsWith('.jsonl')
+
+/**
+ * Parsed sessions, keyed by file and invalidated on mtime and size. The scan runs on a
+ * poll and these files reach 24 MB, so re-reading an unchanged one every few seconds is
+ * what this exists to prevent. Same reason `claude-code.mjs` caches `transcriptMeta`.
+ */
+const cache = new Map()
+
+async function readSession(file, size, mtimeMs) {
+  const hit = cache.get(file)
+  if (hit && hit.mtimeMs === mtimeMs && hit.size === size) return hit.meta
+  const meta = file.endsWith('.jsonl') ? await readJsonl(file, size) : await readJson(file, size)
+  cache.set(file, { mtimeMs, size, meta })
+  return meta
+}
+
+function toThread(id, file, m, st, projectPath, project, now) {
+  const fromPrompt = m.prompt ? m.prompt.split('\n')[0].slice(0, 120) : ''
+  const mtime = Math.round(st.mtimeMs)
+  const lastActivityAt = Math.max(m.lastMessageDate, mtime)
+  return {
+    id: `vscode-copilot:${id}`,
+    harness: 'vscode-copilot',
+    harnessName: 'VS Code Copilot',
+    title: m.customTitle || fromPrompt || 'Untitled thread',
+    preview: m.prompt.slice(0, 240),
+    project,
+    projectPath,
+    cwd: projectPath,
+    worktree: '',
+    gitBranch: '', // VS Code records none on a chat session
+    model: m.modelId.startsWith(MODEL_PREFIX) ? m.modelId.slice(MODEL_PREFIX.length) : m.modelId,
+    effort: m.agentId ? chatMode(m.agentId) : '',
+    createdAt: m.createdAt || mtime,
+    lastActivityAt,
+    lastFocusedAt: 0,
+    running: now - lastActivityAt < RUNNING_WINDOW_MS,
+    // VS Code keeps no read state. Edits sitting unaccepted in the working tree is the one
+    // thing it does record that means "this is waiting on you", which is what unread drives.
+    unread: m.pendingEdits,
+    hasError: m.hasError,
+    archived: false,
+    starred: false,
+    sizeBytes: st.size,
+    source: m.location,
+    canOpen: true,
+    canArchive: false, // VS Code keeps no archived state for chat sessions
+    ref: { id, file, projectPath },
+  }
+}
+
+async function scanThreads({ roots, now = Date.now() } = {}) {
+  // Keyed by session uuid: one session can exist as both a .json and a .jsonl after VS Code
+  // migrates it, and two threads with one id would merge into one astronaut.
+  const found = new Map()
+
+  for (const root of roots || defaultRoots()) {
+    for (const dir of await listDirs(storageDir(root))) {
+      const files = await listFiles(path.join(dir, 'chatSessions'), isSession)
+      if (!files.length) continue
+      const { projectPath, project } = await readWorkspace(dir)
+
+      for (const file of files) {
+        let entry
+        try {
+          const st = await stat(file)
+          const m = await readSession(file, st.size, st.mtimeMs)
+          // An abandoned session with no request is not a thread. Only skip when the read
+          // covered the whole file, so "no requests" is known rather than merely unseen.
+          if (m.complete && m.requests === 0) continue
+          const id = path.basename(file).replace(/\.jsonl?$/, '')
+          entry = {
+            id,
+            jsonl: file.endsWith('.jsonl'),
+            thread: toThread(id, file, m, st, projectPath, project, now),
+          }
+        } catch {
+          continue // unreadable, or being written right now: skip it, never the pass
+        }
+        const prev = found.get(entry.id)
+        // Prefer the .jsonl — it is the format the session was migrated *to*.
+        if (!prev || (entry.jsonl && !prev.jsonl)) found.set(entry.id, entry)
+      }
+    }
+  }
+  return [...found.values()].map((e) => e.thread)
+}
+
 export default {
   id: 'vscode-copilot',
   name: 'VS Code Copilot',
@@ -274,7 +376,7 @@ export default {
     for (const root of roots || defaultRoots()) if (await exists(storageDir(root))) return true
     return false
   },
-  scanThreads: async () => [],
+  scanThreads,
   openThread: () => ({ ok: false, error: 'not implemented yet' }),
   newSession: () => ({ ok: false, error: 'not implemented yet' }),
   setArchived: async () => ({ ok: false, error: 'not implemented yet' }),

@@ -273,3 +273,131 @@ test('flags an error recorded in a request result', async () => {
   const m = await readJsonFile('g.json', body)
   assert.equal(m.hasError, true)
 })
+
+test('maps a session to a Thread with project, title, model and mode', async () => {
+  const root = await fakeRoot({
+    abc: { folder: 'file:///c%3A/Projects/flight-app', sessions: { 'aaaa-1.json': jsonSession() } },
+  })
+  const [t] = await vscode.scanThreads({ roots: [root] })
+  assert.equal(t.project, 'flight-app')
+  assert.equal(t.projectPath, path.normalize('C:/Projects/flight-app'))
+  assert.equal(t.cwd, t.projectPath)
+  assert.equal(t.title, 'Fix the login redirect')
+  assert.equal(t.preview, 'Fix the login redirect')
+  assert.equal(t.model, 'claude-sonnet-4')
+  assert.equal(t.effort, 'agent')
+  assert.equal(t.createdAt, Date.parse('2026-09-01T10:00:00.000Z'))
+})
+
+test('namespaces the id so it cannot collide with another harness', async () => {
+  const root = await fakeRoot({
+    abc: { folder: 'file:///r', sessions: { 'dddddddd-0000-0000-0000-000000000001.json': jsonSession() } },
+  })
+  const [t] = await vscode.scanThreads({ roots: [root] })
+  assert.equal(t.id, 'vscode-copilot:dddddddd-0000-0000-0000-000000000001')
+  assert.equal(t.harness, 'vscode-copilot')
+  assert.equal(t.harnessName, 'VS Code Copilot')
+})
+
+test('scans every root it is given', async () => {
+  const a = await fakeRoot({ h1: { folder: 'file:///r1', sessions: { 'x-1.json': jsonSession('one') } } })
+  const b = await fakeRoot({ h2: { folder: 'file:///r2', sessions: { 'x-2.json': jsonSession('two') } } })
+  assert.equal((await vscode.scanThreads({ roots: [a, b] })).length, 2)
+})
+
+test('keeps a session whose workspace.json is missing, with no project', async () => {
+  const root = await fakeRoot({ abc: { sessions: { 'x-3.json': jsonSession() } } })
+  const [t] = await vscode.scanThreads({ roots: [root] })
+  assert.equal(t.project, '')
+  assert.equal(t.projectPath, '')
+  assert.equal(t.title, 'Fix the login redirect')
+})
+
+test('skips a session that was opened and abandoned without a prompt', async () => {
+  const empty = JSON.stringify(
+    { version: 3, initialLocation: 'panel', requests: [], creationDate: 1, lastMessageDate: 2 }, null, 2)
+  const root = await fakeRoot({
+    abc: {
+      folder: 'file:///r',
+      sessions: { 'eeee-1.json': empty, 'eeee-2.jsonl': jsonl([base()]), 'eeee-3.json': jsonSession() },
+    },
+  })
+  const threads = await vscode.scanThreads({ roots: [root] })
+  assert.equal(threads.length, 1)
+  assert.equal(threads[0].id, 'vscode-copilot:eeee-3')
+})
+
+/** The same session migrated between formats: one thread, from the newer file. */
+test('deduplicates a session that exists as both .json and .jsonl', async () => {
+  const root = await fakeRoot({
+    abc: {
+      folder: 'file:///r',
+      sessions: {
+        'ffff-1.json': jsonSession('the old copy'),
+        'ffff-1.jsonl': jsonl([base(), appendRequest('the migrated copy')]),
+      },
+    },
+  })
+  const threads = await vscode.scanThreads({ roots: [root] })
+  assert.equal(threads.length, 1)
+  assert.equal(threads[0].title, 'the migrated copy')
+})
+
+/** If the newer copy is the empty one, the older copy is still a thread. */
+test('keeps the .json when its .jsonl counterpart is empty', async () => {
+  const root = await fakeRoot({
+    abc: {
+      folder: 'file:///r',
+      sessions: { 'ffff-2.json': jsonSession('the only real copy'), 'ffff-2.jsonl': jsonl([base()]) },
+    },
+  })
+  const threads = await vscode.scanThreads({ roots: [root] })
+  assert.equal(threads.length, 1)
+  assert.equal(threads[0].title, 'the only real copy')
+})
+
+test('falls back to Untitled thread when nothing names the session', async () => {
+  const body = JSON.stringify({
+    version: 3, initialLocation: 'panel',
+    requests: [{ requestId: 'r1', message: { parts: [] } }],
+    creationDate: 1, lastMessageDate: 2,
+  }, null, 2)
+  const root = await fakeRoot({ abc: { folder: 'file:///r', sessions: { 'x-4.json': body } } })
+  const [t] = await vscode.scanThreads({ roots: [root] })
+  assert.equal(t.title, 'Untitled thread')
+  assert.equal(t.preview, '')
+})
+
+test('a session touched just now is running; an old one is not', async () => {
+  const root = await fakeRoot({ abc: { folder: 'file:///r', sessions: { 'x-5.json': jsonSession() } } })
+  const [live] = await vscode.scanThreads({ roots: [root], now: Date.now() })
+  assert.equal(live.running, true)
+  const [stale] = await vscode.scanThreads({ roots: [root], now: Date.now() + 3_600_000 })
+  assert.equal(stale.running, false)
+})
+
+test('reports what it cannot do rather than pretending', async () => {
+  const root = await fakeRoot({ abc: { folder: 'file:///r', sessions: { 'x-6.json': jsonSession() } } })
+  const [t] = await vscode.scanThreads({ roots: [root] })
+  assert.equal(t.canOpen, true)
+  assert.equal(t.canArchive, false)
+  assert.equal(t.archived, false)
+  assert.equal(t.gitBranch, '')
+  assert.equal(t.worktree, '')
+  assert.equal(t.source, 'panel')
+  assert.equal(t.sizeBytes > 0, true)
+  assert.deepEqual(Object.keys(t.ref).sort(), ['file', 'id', 'projectPath'])
+})
+
+test('every field the colony reads is defined', async () => {
+  const root = await fakeRoot({ abc: { folder: 'file:///r', sessions: { 'x-7.json': jsonSession() } } })
+  const [t] = await vscode.scanThreads({ roots: [root] })
+  for (const key of [
+    'id', 'harness', 'harnessName', 'title', 'preview', 'project', 'projectPath', 'cwd',
+    'worktree', 'gitBranch', 'model', 'effort', 'createdAt', 'lastActivityAt', 'lastFocusedAt',
+    'running', 'unread', 'hasError', 'archived', 'starred', 'sizeBytes', 'source', 'canOpen',
+    'canArchive', 'ref',
+  ]) {
+    assert.notEqual(t[key], undefined, `${key} is undefined`)
+  }
+})
