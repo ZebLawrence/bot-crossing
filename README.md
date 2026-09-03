@@ -2,7 +2,7 @@
 
 **[botcrossing.com](https://botcrossing.com)**
 
-Every coding-agent thread on this Mac is a little astronaut. They walk out of the ship, claim
+Every coding-agent thread on this machine is a little astronaut. They walk out of the ship, claim
 a plot for their repo, and build something. When one needs you it stops and holds a `?` over
 its head; click it and the thread opens back in whichever harness it came from.
 
@@ -24,9 +24,10 @@ second process. For a built version, `npm start` (build + serve) or `npm run ser
 `dist/` already exists. Binds to `127.0.0.1`, and answers only its own page — see
 [Keeping it local](#keeping-it-local).
 
-**macOS only, for now.** Opening a thread, revealing a folder and starting a new session all
-go through `open(1)` and a `harness://` deep link. The scanning half is portable; nobody has
-done the Linux or Windows side of the opener yet.
+**macOS and Windows.** Opening a thread, revealing a folder and starting a new session go
+through `open(1)` on macOS and `start` on Windows, plus a `harness://` deep link. The choice
+is made at runtime, so one checkout runs on either. Linux has no opener yet — `xdg-open` is
+the missing piece, and it is the same one function in `server/api.mjs`.
 
 ## Which harnesses work
 
@@ -178,7 +179,7 @@ into the same repo. Picking somebody is also picking the zone they are standing 
   `claude://code/new?folder=…` deep link Finder's "New Claude Code Session Here" quick
   action uses, so the desktop app opens an empty session with the repo as its workspace —
   nothing is resumed and nothing is written.
-- **Finder** opens the folder, **Copy path** copies it.
+- **Finder** (**Explorer** on Windows) opens the folder, **Copy path** copies it.
 - Underneath, everything running in that repo, whoever wants something first. Clicking one
   flies to its astronaut and selects it.
 

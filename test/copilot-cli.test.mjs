@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, access } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -24,6 +24,19 @@ const start = (cwd, gitRoot, branch, ts) => ({
           context: { cwd, gitRoot, branch, headCommit: 'abc123' } },
 })
 const userMsg = (content, ts) => ({ type: 'user.message', timestamp: ts, data: { content } })
+
+/** The launcher write is fire-and-forget by design, so the test waits for it rather than racing. */
+async function waitFor(file, tries = 50) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      await access(file)
+      return
+    } catch {
+      await new Promise((r) => setTimeout(r, 10))
+    }
+  }
+  throw new Error(`launcher never appeared at ${file}`)
+}
 
 test('maps a session to a Thread with repo, path and branch from session.start', async () => {
   const root = await fakeHome({
@@ -135,4 +148,47 @@ test('finds a session that has only workspace.yaml and no event log', async () =
   assert.equal(t.createdAt, Date.parse('2026-03-22T16:02:48.457Z'))
   assert.equal(t.lastActivityAt, Date.parse('2026-03-22T17:00:00.000Z'))
   assert.equal(t.title, 'Untitled thread')
+})
+
+/**
+ * The launcher is the one part of this adapter that is platform-bound, so it is asserted
+ * against whichever platform the suite is running on rather than skipped. The quoting is
+ * the load-bearing detail: `JSON.stringify` is right for bash and wrong for cmd, where the
+ * `\\` it emits is two literal separators rather than an escaped one.
+ */
+const SPACED = process.platform === 'win32' ? 'C:\\Program Files\\App' : '/Users/z/Some App'
+
+test('openThread writes a launcher this platform can actually run', async () => {
+  const id = 'cccccccc-0000-0000-0000-000000000001'
+  const r = copilot.openThread({ id, cwd: SPACED })
+  assert.equal(r.ok, true)
+
+  const file = process.platform === 'win32' ? r.url : r.url.replace(/^file:\/\//, '')
+  await waitFor(file)
+  const body = await readFile(file, 'utf8')
+
+  assert.match(body, new RegExp(`--resume=${id}`))
+  if (process.platform === 'win32') {
+    assert.equal(path.extname(file), '.cmd')
+    assert.equal(r.url, file, 'Windows hands the opener a bare path, not a file:// URL')
+    assert.match(body, /^@echo off/)
+    assert.ok(body.includes(`cd /d "${SPACED}"`), `cmd path must not be backslash-escaped: ${body}`)
+  } else {
+    assert.equal(path.extname(file), '.command')
+    assert.match(r.url, /^file:\/\//)
+    assert.match(body, /^#!\/bin\/bash/)
+    assert.ok(body.includes(`cd ${JSON.stringify(SPACED)}`), body)
+  }
+})
+
+test('newSession launches the CLI with no session to resume', async () => {
+  const r = copilot.newSession(SPACED)
+  assert.equal(r.ok, true)
+
+  const file = process.platform === 'win32' ? r.url : r.url.replace(/^file:\/\//, '')
+  await waitFor(file)
+  const body = await readFile(file, 'utf8')
+
+  assert.doesNotMatch(body, /--resume/)
+  assert.match(body, /copilot/)
 })

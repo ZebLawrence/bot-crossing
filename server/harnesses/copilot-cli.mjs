@@ -11,8 +11,9 @@
  *     carries the same context, and `user.message` / `assistant.message` /
  *     `tool.execution_*` are what give a thread its title, its unread state and its size.
  *
- * On this machine 22 of 22 sessions had `workspace.yaml` and only 7 had `events.jsonl`, so
- * treating the event log as the source would silently drop two thirds of the colony.
+ * Measured twice: 22 of 22 sessions had `workspace.yaml` and 7 had `events.jsonl` on a Mac,
+ * 78 of 78 and 37 on a Windows box. Treating the event log as the source would silently drop
+ * half to two thirds of the colony.
  *
  * Read-only. Copilot CLI has no archive concept, so `setArchived` declines and the colony
  * keeps that state on its own side (see server/harnesses/README.md).
@@ -187,26 +188,66 @@ async function scanThreads({ root, now = Date.now() } = {}) {
 
 /**
  * There is no `copilot://` URL scheme, so reopening means running the CLI. We write a tiny
- * launcher into the temp dir and hand its `file://` URL to the opener, which is what makes
- * Terminal come up in the right directory on the right session.
+ * launcher into the temp dir and hand it to the opener, which is what makes a terminal come
+ * up in the right directory on the right session.
+ *
+ * The two platforms differ in five ways at once — file extension, how a word is quoted, the
+ * script body, whether the executable bit means anything, and what the opener wants handed
+ * back — so they are one table rather than five branches. The Windows entry returns a bare
+ * path, not a `file://` URL: `start` runs a `.cmd` handed to it as a path, but hands a
+ * `file://` to the browser instead.
+ *
+ * Quoting matters here because paths with spaces are the common case on Windows rather than
+ * the exception, and the two shells do not agree on what a quoted string means.
  */
+const LAUNCHERS = {
+  win32: {
+    ext: '.cmd',
+    /**
+     * cmd.exe has no escape character inside double quotes, and Windows forbids `"` in a
+     * path, so wrapping *is* quoting. `JSON.stringify` would be actively wrong: the `\\` it
+     * emits is not an escaped backslash to cmd, it is two literal separators.
+     */
+    quote: (s) => `"${s}"`,
+    body: (cd, run) => `@echo off\r\ncd /d ${cd} || exit /b 1\r\n${run}\r\n`,
+    mode: null, // no executable bit to set; chmod on Windows only toggles read-only
+    url: (file) => file,
+  },
+  posix: {
+    ext: '.command',
+    /** A bash double-quoted string, where `\\` really is an escaped backslash. */
+    quote: (s) => JSON.stringify(s),
+    body: (cd, run) => `#!/bin/bash\ncd ${cd} || exit 1\nexec ${run}\n`,
+    mode: 0o755,
+    url: (file) => `file://${file}`,
+  },
+}
+
+const launcherFor = (platform = process.platform) =>
+  platform === 'win32' ? LAUNCHERS.win32 : LAUNCHERS.posix
+
+/** Writes the launcher and returns what the opener should be given. */
+function writeLauncher(name, dir, args) {
+  const l = launcherFor()
+  const file = path.join(os.tmpdir(), name + l.ext)
+  const body = l.body(l.quote(dir), ['copilot', ...args.map(l.quote)].join(' '))
+  // Fire-and-forget: the opener only needs the path, and a failure here surfaces as the
+  // window not appearing rather than a broken colony.
+  writeFile(file, body)
+    .then(() => (l.mode === null ? null : chmod(file, l.mode)))
+    .catch(() => {})
+  return { ok: true, url: l.url(file) }
+}
+
 function openThread(ref) {
   const id = ref?.id
   if (!id) return { ok: false, error: 'No session id on this thread' }
-  const script = path.join(os.tmpdir(), `bot-crossing-copilot-${id}.command`)
   const cwd = ref.cwd || os.homedir()
-  const body = `#!/bin/bash\ncd ${JSON.stringify(cwd)} || exit 1\nexec copilot --resume=${JSON.stringify(id)}\n`
-  // Fire-and-forget: the opener only needs the path, and a failure here surfaces as the
-  // window not appearing rather than a broken colony.
-  writeFile(script, body).then(() => chmod(script, 0o755)).catch(() => {})
-  return { ok: true, url: `file://${script}` }
+  return writeLauncher(`bot-crossing-copilot-${id}`, cwd, [`--resume=${id}`])
 }
 
 function newSession(dir) {
-  const script = path.join(os.tmpdir(), 'bot-crossing-copilot-new.command')
-  const body = `#!/bin/bash\ncd ${JSON.stringify(dir)} || exit 1\nexec copilot\n`
-  writeFile(script, body).then(() => chmod(script, 0o755)).catch(() => {})
-  return { ok: true, url: `file://${script}` }
+  return writeLauncher('bot-crossing-copilot-new', dir, [])
 }
 
 export default {
