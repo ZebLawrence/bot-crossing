@@ -78,9 +78,21 @@ async function writeState(next) {
   return state
 }
 
-/** Hand a `harness://…` deep link to the OS. `open` gets an argument list, never a shell string. */
+/**
+ * Hand a `harness://…` deep link, a folder, or a launcher script to the OS. The opener is
+ * chosen at runtime rather than at install, so one checkout serves both platforms.
+ *
+ * Either way it is an argument list, never a shell string. On Windows the empty `''` after
+ * `start` is the window-title slot: omit it and `start` reads a quoted path as the title
+ * and silently opens nothing.
+ */
+const OPENER = process.platform === 'win32'
+  ? (url) => ['cmd', ['/c', 'start', '', url]]
+  : (url) => ['open', [url]]
+
 function launch(url) {
-  const child = spawn('open', [url], { stdio: 'ignore', detached: true })
+  const [cmd, args] = OPENER(url)
+  const child = spawn(cmd, args, { stdio: 'ignore', detached: true, windowsHide: true })
   child.unref()
 }
 
@@ -90,7 +102,8 @@ function launch(url) {
  * has since been moved or deleted must fail here rather than hand `open` a dead path.
  */
 async function resolveFolder(folder) {
-  if (typeof folder !== 'string' || !folder.startsWith('/')) return null
+  // `path.isAbsolute` rather than a leading `/`: `C:\Users\…` is absolute too.
+  if (typeof folder !== 'string' || !path.isAbsolute(folder)) return null
   const dir = path.resolve(folder)
   const stat = await fsp.stat(dir).catch(() => null)
   return stat && stat.isDirectory() ? dir : null

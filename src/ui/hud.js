@@ -16,6 +16,15 @@ import { FACE, FRAME_COLS, FRAME_ROWS } from '../agents/faces.js'
  * not in here.
  */
 
+/**
+ * Names for things the OS calls something different. The server only ever serves the
+ * machine it runs on, so the browser is a sound source for which one that is — and `^win`
+ * rather than `win`, so `Darwin` cannot match.
+ */
+const IS_WINDOWS = /^win/i.test(navigator.userAgentData?.platform || navigator.platform || '')
+const FILE_MANAGER = IS_WINDOWS ? 'Explorer' : 'Finder'
+const HIDE_UI_CHORD = IS_WINDOWS ? 'Ctrl+\\' : '⌘\\'
+
 const ICON = {
   settings: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
   eye: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>`,
@@ -756,16 +765,20 @@ function statusClass(status) {
  * leading `~`, so the trim is done here and the whole path lives in the title attribute.
  */
 function shortPath(dir, max = 30) {
-  const home = dir.replace(/^\/Users\/[^/]+/, '~')
+  // The separator is read off the path rather than assumed: these strings come from
+  // whichever machine the harness runs on, so both `/Users/you/…` and `C:\Users\you\…`
+  // have to shorten the same way.
+  const sep = dir.includes('\\') ? '\\' : '/'
+  const home = dir.replace(/^(?:\/Users\/[^/]+|[A-Za-z]:\\Users\\[^\\]+)/, '~')
   if (home.length <= max) return home
-  const parts = home.split('/')
+  const parts = home.split(sep)
   let out = parts.pop() || ''
   while (parts.length) {
     const next = parts.pop()
     if (out.length + next.length + 3 > max) break
-    out = `${next}/${out}`
+    out = `${next}${sep}${out}`
   }
-  return `…/${out}`
+  return `…${sep}${out}`
 }
 
 function shortModel(model) {
@@ -833,7 +846,7 @@ const TEMPLATE = `
       <div class="project-actions">
         <button class="btn primary" id="btn-new-session" title="Start a new thread in this folder (C)">${ICON.plus} New conversation</button>
         <div class="pair">
-          <button class="btn" id="btn-reveal" title="Show this folder in Finder">${ICON.folder} Finder</button>
+          <button class="btn" id="btn-reveal" title="Show this folder in ${FILE_MANAGER}">${ICON.folder} ${FILE_MANAGER}</button>
           <button class="btn" id="btn-copy-path" title="Copy the folder path">${ICON.copy} Copy path</button>
         </div>
       </div>
@@ -881,7 +894,7 @@ const TEMPLATE = `
 <div class="help">
   <div class="sheet panel">
     <h2>Bot Crossing</h2>
-    <p class="sub">Every coding-agent thread on this Mac is an astronaut. They walk out of the ship, claim a plot for their repo, and build. Click one to open its thread; click a zone — its deck or its name — for the repo itself, and start a new conversation there. Navigation works like Google Earth — drag the ground itself, right-drag to tilt, scroll to zoom in on whatever is under the cursor.</p>
+    <p class="sub">Every coding-agent thread on this machine is an astronaut. They walk out of the ship, claim a plot for their repo, and build. Click one to open its thread; click a zone — its deck or its name — for the repo itself, and start a new conversation there. Navigation works like Google Earth — drag the ground itself, right-drag to tilt, scroll to zoom in on whatever is under the cursor.</p>
     <div class="cols">
       <div>
         <div class="k"><span>Drag the ground</span><kbd>drag</kbd></div>
@@ -890,7 +903,7 @@ const TEMPLATE = `
         <div class="k"><span>Zoom to cursor</span><kbd>scroll</kbd></div>
         <div class="k"><span>Move / zoom</span><kbd>arrows</kbd> <kbd>+ −</kbd></div>
         <div class="k"><span>Reset view</span><kbd>0</kbd></div>
-        <div class="k"><span>Hide all UI</span><kbd>H</kbd> <kbd>⌘\\</kbd></div>
+        <div class="k"><span>Hide all UI</span><kbd>H</kbd> <kbd>${HIDE_UI_CHORD}</kbd></div>
         <div class="k"><span>Settings</span><kbd>S</kbd></div>
         <div class="k"><span>Screenshot</span><kbd>P</kbd></div>
       </div>
