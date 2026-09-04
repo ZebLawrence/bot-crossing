@@ -21,6 +21,29 @@ export async function readHead(file, bytes) {
   }
 }
 
+/**
+ * Read the last chunk of a file — the mirror of `readHead`, for a format that keeps its
+ * scalars after the bulk of its data. A VS Code `.json` chat session puts `creationDate`,
+ * `lastMessageDate` and `customTitle` after a `requests` array that runs to megabytes.
+ *
+ * Unlike `readHead` this does not trim a partial line: callers match patterns against the
+ * text rather than parsing it line by line, and trimming the front would drop the first
+ * field as often as not.
+ */
+export async function readTail(file, bytes) {
+  const fh = await fsp.open(file, 'r')
+  try {
+    const { size } = await fh.stat()
+    const len = Math.min(bytes, size)
+    if (len <= 0) return ''
+    const buf = Buffer.allocUnsafe(len)
+    const { bytesRead } = await fh.read(buf, 0, len, size - len)
+    return buf.subarray(0, bytesRead).toString('utf8')
+  } finally {
+    await fh.close()
+  }
+}
+
 /** Parse a JSONL blob, skipping the partial or malformed lines a live file always has. */
 export function jsonLines(text) {
   const out = []

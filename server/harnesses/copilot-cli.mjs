@@ -17,15 +17,41 @@
  *
  * Read-only. Copilot CLI has no archive concept, so `setArchived` declines and the colony
  * keeps that state on its own side (see server/harnesses/README.md).
+ *
+ * Some of these sessions were started by the Copilot sidebar *inside VS Code*, which writes
+ * into this same store. They stay here, where their files are, and carry
+ * `source: 'vscode-sidebar'` to say so.
  */
 import os from 'node:os'
 import path from 'node:path'
 import { readFile, stat, writeFile, chmod } from 'node:fs/promises'
 
-import { listDirs, exists } from '../lib/fsutil.mjs'
+import { listDirs, listFiles, exists } from '../lib/fsutil.mjs'
 
 const DEFAULT_ROOT = path.join(os.homedir(), '.copilot')
 const stateDir = (root) => path.join(root || DEFAULT_ROOT, 'session-state')
+const sidebarDir = (root) => path.join(root || DEFAULT_ROOT, 'sidebar-sessions-state')
+
+/**
+ * Session ids the Copilot sidebar inside VS Code started. It writes into this same store
+ * through the `copilotCLIShim.js` that VS Code ships, so these threads are ours — but they
+ * did not come from a terminal, and the card should not claim they did.
+ *
+ * Attribution only. Handing them to the VS Code adapter instead would make two adapters
+ * depend on this directory, and a stale marker would then drop or duplicate a thread
+ * rather than merely mislabel one.
+ */
+async function sidebarSessionIds(root) {
+  const ids = new Set()
+  for (const file of await listFiles(sidebarDir(root), (n) => n.endsWith('.json'))) {
+    try {
+      for (const id of JSON.parse(await readFile(file, 'utf8'))?.sessionIds || []) ids.add(id)
+    } catch {
+      /* one unreadable marker should not cost the labelling of the rest */
+    }
+  }
+  return ids
+}
 
 /** Treat a session as live if it moved this recently. The CLI writes an event per turn and
  *  per tool call, so anything inside a minute is mid-work rather than finished. */
@@ -133,7 +159,7 @@ const EMPTY = {
   lastUserAt: 0, lastAssistantAt: 0, hasError: false, sizeBytes: 0,
 }
 
-function toThread(id, s, now) {
+function toThread(id, s, now, fromSidebar) {
   const cwd = s.context.cwd || ''
   const projectPath = s.context.gitRoot || cwd
   const title = s.firstPrompt ? s.firstPrompt.split('\n')[0].slice(0, 120) : 'Untitled thread'
@@ -160,7 +186,7 @@ function toThread(id, s, now) {
     archived: false,
     starred: false,
     sizeBytes: s.sizeBytes,
-    source: 'cli',
+    source: fromSidebar ? 'vscode-sidebar' : 'cli',
     canOpen: true,
     canArchive: false, // Copilot CLI keeps no archive state of its own
     ref: { id, cwd },
@@ -170,6 +196,7 @@ function toThread(id, s, now) {
 async function scanThreads({ root, now = Date.now() } = {}) {
   const base = stateDir(root)
   if (!(await exists(base))) return []
+  const sidebar = await sidebarSessionIds(root)
   const threads = []
   for (const dir of await listDirs(base)) {
     const id = path.basename(dir) // listDirs returns full paths, not bare names
@@ -181,7 +208,7 @@ async function scanThreads({ root, now = Date.now() } = {}) {
       ev = null // no event log on this session, or it is unreadable — the yaml still stands
     }
     if (!base && !ev) continue // neither half readable: skip, never throw the pass away
-    threads.push(toThread(id, mergeSession(base, ev), now))
+    threads.push(toThread(id, mergeSession(base, ev), now, sidebar.has(id)))
   }
   return threads
 }
