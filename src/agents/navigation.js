@@ -23,8 +23,22 @@
 const CELL = 0.5
 /** Half-width of the navigable square. Comfortably contains the colony and the landing pad. */
 const HALF = 56
-/** Give up rather than stall the frame if a search goes pathological. */
-const MAX_EXPANSIONS = 6000
+/**
+ * Give up rather than stall the frame if a search goes pathological.
+ *
+ * Measured rather than guessed, against a 45-plot / 90-thread colony: the most expensive
+ * *honest* route on that map costs 19,247 expansions, and raising the cap past 30,000
+ * changes nothing, so 19,247 is the real ceiling and this is comfortable headroom over it.
+ * The old 6,000 was under it, and the symptom was not a slow path but no path at all —
+ * `findPath` returning null for a route that plainly exists, which sends an astronaut
+ * steering straight at its goal and leaning on whatever is in the way.
+ *
+ * Most routes are nowhere near this: the median is ~2,000. It is the handful threading a
+ * cluttered zone that need the room.
+ *
+ * Exposed as an instance field so a colony can be measured, not so it can be tuned by feel.
+ */
+const MAX_EXPANSIONS = 30000
 
 const SQRT2 = Math.SQRT2
 
@@ -48,6 +62,32 @@ export class Navigation {
     this.generation = 0
     /** Bumped on every rebuild; agents use it to notice their path is stale. */
     this.version = 0
+
+    /**
+     * Which cells are connected to `origin`, and the version that answer was computed for.
+     * Built lazily, because a rebuild that nobody asks a reachability question about should
+     * not pay for one.
+     */
+    this.reach = new Uint8Array(n)
+    this.reachVersion = -1
+    this.origin = { x: 0, z: 0 }
+    this._queue = new Int32Array(n)
+
+    this.maxExpansions = MAX_EXPANSIONS
+    /** Expansions the last search actually used — diagnostics, and how the cap was chosen. */
+    this.lastExpansions = 0
+  }
+
+  /**
+   * Where the crew comes from. Reachability is asked from here, because an astronaut that
+   * cannot walk from the ship to its site can never be at its site, however open the ground
+   * immediately around that site happens to be.
+   */
+  setOrigin(x, z) {
+    if (this.origin.x === x && this.origin.z === z) return
+    this.origin.x = x
+    this.origin.z = z
+    this.reachVersion = -1
   }
 
   // ── grid <-> world ──────────────────────────────────────────────────────────────────
@@ -105,6 +145,100 @@ export class Navigation {
     }
     this.version++
     void cell
+  }
+
+  // ── reachability ────────────────────────────────────────────────────────────────────
+
+  /**
+   * Flood the free cells connected to the origin.
+   *
+   * Four-connected on purpose, and that is not an approximation: A* here is 8-connected but
+   * refuses to cut corners — a diagonal is only legal when both of its orthogonal neighbours
+   * are clear — so anywhere a diagonal can go, the two orthogonals can go as well. The two
+   * notions of "connected" are therefore the same one, and `findPath` succeeds exactly when
+   * this says it should. There is a test that asserts precisely that.
+   */
+  _buildReach() {
+    const { size, reach, blocked } = this
+    reach.fill(0)
+    // A building dropped on the door does not make the world unreachable; start from the
+    // nearest cell somebody could actually stand on.
+    const start = this.nearestFree(this.origin.x, this.origin.z)
+    this.reachVersion = this.version
+    if (!start) return
+
+    const queue = this._queue
+    let head = 0
+    let tail = 0
+    const startIdx = start.iz * size + start.ix
+    reach[startIdx] = 1
+    queue[tail++] = startIdx
+
+    while (head < tail) {
+      const cur = queue[head++]
+      const cx = cur % size
+      const cz = (cur - cx) / size
+      // Orthogonals only — see the note above.
+      for (let k = 0; k < 4; k++) {
+        const nx = cx + NEIGHBOURS[k * 2]
+        const nz = cz + NEIGHBOURS[k * 2 + 1]
+        if (nx < 0 || nz < 0 || nx >= size || nz >= size) continue
+        const nIdx = nz * size + nx
+        if (reach[nIdx] === 1 || blocked[nIdx] === 1) continue
+        reach[nIdx] = 1
+        queue[tail++] = nIdx
+      }
+    }
+  }
+
+  _reachMask() {
+    if (this.reachVersion !== this.version) this._buildReach()
+    return this.reach
+  }
+
+  /**
+   * Can an astronaut standing at the origin ever get here? A cell can be perfectly free and
+   * still be nowhere — a plot whose own buildings ring it closed is open ground with no way
+   * in, and a site placed there is a trap the crew walks at for as long as the thread lives.
+   */
+  isReachable(x, z) {
+    const ix = this.toCell(x)
+    const iz = this.toCell(z)
+    if (!this.inBounds(ix, iz)) return false
+    return this._reachMask()[iz * this.size + ix] === 1
+  }
+
+  /**
+   * The nearest cell that is both free *and* connected to the origin. This is what a stand
+   * position wants: `nearestFree` will happily hand back the middle of a sealed pocket,
+   * which is exactly the trap it was meant to avoid.
+   */
+  nearestReachable(x, z, maxRings = 48) {
+    const reach = this._reachMask()
+    const cx = this.toCell(x)
+    const cz = this.toCell(z)
+    if (this.inBounds(cx, cz) && reach[cz * this.size + cx] === 1) return { ix: cx, iz: cz }
+
+    for (let ring = 1; ring <= maxRings; ring++) {
+      let best = null
+      let bestD = Infinity
+      for (let dz = -ring; dz <= ring; dz++) {
+        for (let dx = -ring; dx <= ring; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== ring) continue
+          const ix = cx + dx
+          const iz = cz + dz
+          if (!this.inBounds(ix, iz)) continue
+          if (reach[iz * this.size + ix] !== 1) continue
+          const d = dx * dx + dz * dz
+          if (d < bestD) {
+            bestD = d
+            best = { ix, iz }
+          }
+        }
+      }
+      if (best) return best
+    }
+    return null
   }
 
   /**
@@ -200,7 +334,7 @@ export class Navigation {
         found = true
         break
       }
-      if (++expansions > MAX_EXPANSIONS) break
+      if (++expansions > this.maxExpansions) break
 
       const cx = current % size
       const cz = (current - cx) / size
@@ -232,6 +366,7 @@ export class Navigation {
       }
     }
 
+    this.lastExpansions = expansions
     if (!found) return null
 
     // Walk the parents back, then smooth.

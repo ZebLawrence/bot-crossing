@@ -642,6 +642,13 @@ export class Astronauts {
       agent.pathGoal.distanceToSquared(agent.site) > 0.25
     if (stale && this._routeBudget > 0) {
       this._routeBudget--
+      // A site nothing can walk to is not a destination, it is a wall to lean on. Retarget
+      // once, here, rather than letting the fallback below steer straight at it every frame:
+      // that is what turns a walled-in plot into a permanent crowd pressed against its side.
+      if (!nav.isReachable(agent.site.x, agent.site.z)) {
+        const spot = nav.nearestReachable(agent.site.x, agent.site.z)
+        if (spot) agent.site.set(nav.toWorld(spot.ix), agent.site.y, nav.toWorld(spot.iz))
+      }
       agent.path = nav.findPath(agent.pos.x, agent.pos.z, agent.site.x, agent.site.z)
       agent.pathAt = 0
       agent.pathVersion = nav.version

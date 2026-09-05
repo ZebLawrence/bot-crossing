@@ -520,6 +520,10 @@ export class Colony {
 
     const ship = shipPosition()
     obstacles.push({ x: ship.x, z: ship.z, r: 3.4 + AGENT_RADIUS })
+    // Reachability is asked from the foot of the ramp, because that is where every astronaut
+    // starts. A site the crew cannot walk to from there is a site nobody ever stands on.
+    const door = this.ship.shipDoor()
+    this.nav.setOrigin(door.x, door.z)
     this.nav.rebuild(obstacles)
   }
 
@@ -653,9 +657,15 @@ export class Colony {
     // The grid is the one built for the last roster, so this is a best effort — but sites
     // are recomputed every poll, and anything walled in by a neighbour is nudged out to the
     // nearest ground somebody can stand on rather than left as a trap.
-    if (this.nav?.isBlocked(site.x, site.z)) {
-      const free = this.nav.nearestFree(site.x, site.z)
-      if (free) site.set(this.nav.toWorld(free.ix), 0, this.nav.toWorld(free.iz))
+    //
+    // *Reachable*, not merely free. A plot's own ring of buildings can close around its
+    // middle — six slots 4.6m apart, each blocking 2.4m, meet — and the ground inside that
+    // ring is perfectly open and completely unreachable. Asking only whether the site is
+    // blocked leaves the crew walking at a wall forever; asking `nearestFree` to fix it
+    // hands back the middle of the same pocket.
+    if (this.nav && !this.nav.isReachable(site.x, site.z)) {
+      const spot = this.nav.nearestReachable(site.x, site.z)
+      if (spot) site.set(this.nav.toWorld(spot.ix), 0, this.nav.toWorld(spot.iz))
     }
     return site
   }
